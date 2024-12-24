@@ -1,78 +1,84 @@
-# This Dockerfile is used for producing 3 container images.
-#
-# base - which is thrown away, that contains node and the basic infrastructure. 
-# devcontainer - which is used for development, and contains the source code and the node_modules.
-# dist - which is used for production, and contains the built source code and the node_modules.
-
-ARG NODE_VERSION="20.17"
-
-# Base image
-FROM docker.io/node:${NODE_VERSION}-alpine3.19 AS base
-
-## Just reduce unccessary noise in the logs.
-ENV NPM_CONFIG_UPDATE_NOTIFIER=false
-ENV NEXT_TELEMETRY_DISABLED=1
-
-RUN apk add --no-cache \
-	caddy \
-	bash=5.2.21-r0 \
-	supervisor=4.2.5-r4
-
-WORKDIR /app
-
-EXPOSE 3000
-EXPOSE 4200
-EXPOSE 5000
-
-COPY var/docker/entrypoint.sh /app/entrypoint.sh
-COPY var/docker/supervisord.conf /etc/supervisord.conf
-COPY var/docker/supervisord /app/supervisord_available_configs/
-COPY var/docker/Caddyfile /app/Caddyfile
-COPY .env.example /config/postiz.env
-
-VOLUME /config
-VOLUME /uploads
-
-LABEL org.opencontainers.image.source=https://github.com/gitroomhq/postiz-app
-
-ENTRYPOINT ["/app/entrypoint.sh"]
-
-# Builder image
-FROM base AS devcontainer
-
-RUN apk add --no-cache \
-	pkgconfig \
-	gcc \
-	pixman-dev \
-	cairo-dev \
-	pango-dev \
-	make \
-	build-base
-
-COPY nx.json tsconfig.base.json package.json package-lock.json build.plugins.js /app/
-COPY apps /app/apps/
-COPY libraries /app/libraries/
-
-RUN npm ci --no-fund && npx nx run-many --target=build --projects=frontend,backend,workers,cron
-
-VOLUME /config
-VOLUME /uploads
-
-LABEL org.opencontainers.image.title="Postiz App (DevContainer)"
-
-# Output image
-FROM base AS dist
-
-COPY --from=devcontainer /app/node_modules/ /app/node_modules/
-COPY --from=devcontainer /app/dist/ /app/dist/
-
-# Required for prisma
-COPY --from=devcontainer /app/libraries/ /app/libraries/
-
-COPY package.json nx.json /app/
-
-VOLUME /config
-VOLUME /uploads
-
-## Labels at the bottom, because CI will eventually add dates, commit hashes, etc.
-LABEL org.opencontainers.image.title="Postiz App (Production)"
+services:
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: postiz
+    restart: always
+    environment:
+      # You must change these. Replace `postiz.your-server.com` with your DNS name - what your web browser sees.
+      MAIN_URL: "https://socialjarvis-nladbvrr.b4a.run"
+      FRONTEND_URL: "https://socialjarvis-nladbvrr.b4a.run"
+      NEXT_PUBLIC_BACKEND_URL: "https://socialjarvis-nladbvrr.b4a.run/api"
+      JWT_SECRET: "njkasdfjbarggb12122141315156165118asdsafdadsfadsfasdf"
+ 
+      # These defaults are probably fine, but if you change your user/password, update it in the
+      # postiz-postgres or postiz-redis services below.
+      DATABASE_URL: "postgresql://postiz-user:postiz-password@postiz-postgres:5432/postiz-db-local"
+      REDIS_URL: "redis://postiz-redis:6379"
+      BACKEND_INTERNAL_URL: "https://socialjarvis-nladbvrr.b4a.run:3000"
+      IS_GENERAL: "true" # Required for self-hosting.
+      # The container images are pre-configured to use /uploads for file storage.
+      # You probably should not change this unless you have a really good reason!
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+    volumes:
+      - postiz-config:/config/
+      - postiz-uploads:/uploads/
+    ports:
+      - 5000:5000
+    networks:
+      - postiz-network
+    depends_on:
+      postiz-postgres:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+ 
+  postiz-postgres:
+    image: postgres:17-alpine
+    container_name: postiz-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: postiz-password
+      POSTGRES_USER: postiz-user
+      POSTGRES_DB: postiz-db-local
+    volumes:
+      - postgres-volume:/var/lib/postgresql/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: pg_isready -U postiz-user -d postiz-db-local
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  postiz-redis:
+    image: redis:7.2
+    container_name: postiz-redis
+    restart: always
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - postiz-redis-data:/data
+    networks:
+      - postiz-network
+ 
+ 
+volumes:
+  postgres-volume:
+    external: false
+ 
+  postiz-redis-data:
+    external: false
+ 
+  postiz-config:
+    external: false
+ 
+  postiz-uploads:
+    external: false
+ 
+networks:
+  postiz-network:
+    external: false
